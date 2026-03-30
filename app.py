@@ -1,7 +1,6 @@
 import re
 import zipfile
 import tempfile
-from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
@@ -9,112 +8,65 @@ import pdfplumber
 import streamlit as st
 
 
-def norm(text: str) -> str:
+# ==============================
+# UTILITÁRIOS
+# ==============================
+
+def norm(text):
     text = (text or "").replace("\u00ad", "")
     text = re.sub(r"\bPág:\s*\d+/\d+\b", "", text, flags=re.I)
-    text = re.sub(r"(?i)Resumo extra[ií]do por.*?(?=\n|$)", "", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\s*\n\s*", "\n", text)
     return text.strip()
 
 
-def oneline(text: str) -> str:
+def oneline(text):
     text = norm(text).replace("\n", " ")
     text = re.sub(r"\(NEXTSUPPLY\d+\)", "", text, flags=re.I)
     text = re.sub(r"\s{2,}", " ", text).strip()
     return text
 
 
-def extract_header(raw: str, fallback: str = "") -> tuple[str, str, str, str, str]:
+def patt(t):
+    parts = re.split(r"\s+", t.lower())
+    return r"\b" + r"[\s\-]?".join(parts) + r"\b"
+
+
+# ==============================
+# EXTRAÇÃO
+# ==============================
+
+def extract_header(raw, fallback=""):
     m = re.search(r"Número da Oportunidade.*?(\d{10})", raw, flags=re.S)
-    if m:
-        numero = m.group(1)
-    else:
-        m = re.search(r"(\d{10})", fallback)
-        numero = m.group(1) if m else ""
+    numero = m.group(1) if m else ""
 
-    m = re.search(r"Tipo de Oportunidade\s*([^\n]+)", raw)
-    tipo = m.group(1).strip() if m else ""
+    tipo = re.search(r"Tipo de Oportunidade\s*([^\n]+)", raw)
+    tipo = tipo.group(1).strip() if tipo else ""
 
-    m = re.search(r"Critério de Julgamento\s*([^\n]+)", raw)
-    criterio = m.group(1).strip() if m else ""
+    crit = re.search(r"Critério de Julgamento\s*([^\n]+)", raw)
+    crit = crit.group(1).strip() if crit else ""
 
-    m = re.search(
-        r"Fim do período de cotação\s*([0-9]{2}\.[0-9]{2}\.[0-9]{4}\s*/\s*[0-9]{2}:[0-9]{2}:[0-9]{2})",
-        raw,
-    )
-    fim = re.sub(r"\s*/\s*", " / ", m.group(1)).strip() if m else ""
+    fim = re.search(r"Fim do período de cotação\s*([0-9\.]+\s*/\s*[0-9:]+)", raw)
+    fim = fim.group(1).strip() if fim else ""
 
-    local = ""
     ml = re.search(r"Local de Entrega\s*(.*?)\nInformações do Comprador", raw, flags=re.S)
-    if ml:
-        local = "; ".join([x.strip() for x in ml.group(1).split("\n") if x.strip()])
+    local = "; ".join([x.strip() for x in ml.group(1).split("\n") if x.strip()]) if ml else ""
 
-    return numero, tipo, criterio, fim, local
-
-
-def extract_item_id(block: str) -> str:
-    patterns = [
-        (r"(?m)^\s*(\d{1,6})\s+\S", 0),
-        (r"(?i)Número\s+Descrição.*?\n(\d+)\s", re.S),
-        (r"(?i)Número\s*\n\s*do item\s*(?:\n|\s)+([0-9A-Za-z\.\-]+)", 0),
-    ]
-    for pattern, flags in patterns:
-        m = re.search(pattern, block, flags=flags)
-        if m:
-            return re.sub(r"\D", "", m.group(1))
-    return ""
+    return numero, tipo, crit, fim, local
 
 
-def extract_qty_unit(block: str, item_id: str) -> tuple[str, str]:
-    patterns = [
-        rf"(?im)^\s*{re.escape(item_id)}\s+.*?\bMaterial\b\s+([0-9]+(?:\.[0-9]{{3}})*(?:,[0-9]+)?)\s+([A-Za-zÀ-ÿ]+)\s+\d{{2}}\.\d{{2}}\.\d{{4}}\b",
-        rf"(?im)^\s*{re.escape(item_id)}\s+.*?\b([0-9]+(?:\.[0-9]{{3}})*(?:,[0-9]+)?)\s+([A-Za-zÀ-ÿ]+)\s+\d{{2}}\.\d{{2}}\.\d{{4}}\b",
-        rf"(?is)\b{re.escape(item_id)}\b.*?\bMaterial\b\s+([0-9]+(?:\.[0-9]{{3}})*(?:,[0-9]+)?)\s+([A-Za-zÀ-ÿ]+)\b",
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, block)
-        if m:
-            return m.group(1).strip(), m.group(2).strip()
-    return "", ""
-
-
-def extract_desc(block: str) -> str:
-    m = re.search(
-        r"(?is)(?:Descrição de Item|Descricao de Item)\s*(.*?)(?:(?:\n(?:Descrição longa do item|Descricao longa do item|Descrição longa|Descricao longa))|\Z)",
-        block,
-    )
-    return oneline(m.group(1)) if m else ""
-
-
-def extract_long(block: str) -> str:
-    block2 = re.split(
-        r"(?i)Declarações envolvidas na oportunidade|Declaracoes envolvidas na oportunidade",
-        block,
-        maxsplit=1,
-    )[0]
-    m = re.search(
-        r"(?is)(?:Descrição longa do item|Descricao longa do item|Descrição longa|Descricao longa)\s*(.*)$",
-        block2,
-    )
-    return oneline(m.group(1)) if m else ""
-
-
-def extract_fab(longd: str) -> str:
+def extract_fab(longd):
     if not longd:
         return ""
     m = re.search(r"(?is)(?:Tp:|Type:|----------)\s*(.*?)(?=Tag|Dados|Número|Declara|$)", longd)
-    if not m:
-        return ""
-    return re.sub(r"\s{2,}", " ", m.group(1)).strip()
+    return re.sub(r"\s{2,}", " ", m.group(1)).strip() if m else ""
 
 
-def make_term_pattern(term: str) -> str:
-    parts = re.split(r"\s+", term.lower().strip())
-    return r"\b" + r"[\s\-]?".join(map(re.escape, parts)) + r"\b"
+# ==============================
+# RESPONSÁVEL (LÓGICA DO 2º CÓDIGO)
+# ==============================
 
-
-def assign_responsavel(df: pd.DataFrame) -> pd.DataFrame:
+def assign(df):
     text = (
         df["Descrição de Item"].fillna("")
         + " "
@@ -123,180 +75,158 @@ def assign_responsavel(df: pd.DataFrame) -> pd.DataFrame:
         + df["Fabricante/PN"].fillna("")
     ).str.lower()
 
-    tipo = df["Tipo de Oportunidade"].fillna("")
-    mask_total = tipo.str.contains("Dispensa Total", case=False, regex=False) | tipo.str.contains(
-        "Inaplica. total", case=False, regex=False
-    )
-    mask_inap = tipo.str.contains("Inaplica.", case=False, regex=False) & ~tipo.str.contains(
-        "Inaplica. total", case=False, regex=False
-    )
-
-    df["Resp_pre"] = pd.NA
-    df.loc[mask_inap, "Resp_pre"] = "Viviana"
-
-    rules = {
-        "Hélio": ["schneider", "siemens"],
-        "Mayara": ["rittal", "skf", "emerson"],
-        "Viviana": ["kongsberg", "yamada", "george", "ston", "dnh", "evac", "steyr"],
-        "Ana Beatriz": ["phoenix", "danfoss", "ex heat"],
-    }
-
-    for responsavel, terms in rules.items():
-        regex = "|".join(make_term_pattern(t) for t in terms)
-        df.loc[df["Resp_pre"].isna() & text.str.contains(regex, regex=True), "Resp_pre"] = responsavel
-
     df["Responsável"] = pd.NA
-    df.loc[mask_inap, "Responsável"] = "Viviana"
+
+    # PRIORIDADE: Inaplica
+    df.loc[df["Tipo de Oportunidade"].fillna("").str.contains("Inaplica.", na=False), "Responsável"] = "Viviana"
+
+    # HELIO (TRAVADO)
+    helio_terms = ["abb", "schneider", "siemens", "rittal", "phoenix", "weidmuller", "rockwell"]
+    for t in helio_terms:
+        df.loc[
+            df["Responsável"].isna() & text.str.contains(patt(t), regex=True, na=False),
+            "Responsável",
+        ] = "Hélio"
+
+    # MAYARA (TRAVADO)
+    for t in ["skf", "emerson"]:
+        df.loc[
+            df["Responsável"].isna() & text.str.contains(patt(t), regex=True, na=False),
+            "Responsável",
+        ] = "Mayara"
+
+    # VIVIANA
+    for t in ["kongsberg", "yamada", "dnh", "evac", "steyr"]:
+        df.loc[
+            df["Responsável"].isna() & text.str.contains(patt(t), regex=True, na=False),
+            "Responsável",
+        ] = "Viviana"
+
+    # GARANTIA: ITENS IGUAIS JUNTOS
+    df["_chave"] = (
+        df["Descrição de Item"].fillna("").str.strip().str.lower() + "|"
+        + df["Descrição longa do item"].fillna("").str.strip().str.lower() + "|"
+        + df["Fabricante/PN"].fillna("").str.strip().str.lower()
+    )
 
     total = len(df)
     targets = {
-        "Ana Beatriz": round(total * 0.30),
-        "Viviana": round(total * 0.30),
-        "Hélio": round(total * 0.20),
+        "Viviana": round(total * 0.33),
+        "Hélio": round(total * 0.33),
     }
     targets["Mayara"] = total - sum(targets.values())
 
-    counts = df["Responsável"].value_counts(dropna=False).to_dict()
-    for key in targets:
-        counts.setdefault(key, 0)
+    counts = df["Responsável"].value_counts(dropna=True).to_dict()
+    for k in targets:
+        counts.setdefault(k, 0)
 
-    for _, grp in df[mask_total].groupby("Numero da Oportunidade"):
+    pendentes = df[df["Responsável"].isna()]
+
+    for _, grp in pendentes.groupby("_chave", sort=False):
+        r = max(targets, key=lambda k: targets[k] - counts[k])
         idxs = grp.index.tolist()
-        pre = df.loc[idxs, "Resp_pre"].dropna()
-        chosen = (
-            pre.value_counts().idxmax()
-            if len(pre)
-            else max(targets, key=lambda k: targets[k] - counts.get(k, 0))
-        )
-        df.loc[idxs, "Responsável"] = chosen
-        counts[chosen] += len(idxs)
+        df.loc[idxs, "Responsável"] = r
+        counts[r] += len(idxs)
 
-    for idx in df[(~mask_total) & df["Responsável"].isna() & df["Resp_pre"].notna()].index:
-        chosen = df.at[idx, "Resp_pre"]
-        df.at[idx, "Responsável"] = chosen
-        counts[chosen] += 1
-
-    for idx in df[df["Responsável"].isna()].index:
-        chosen = max(targets, key=lambda k: targets[k] - counts.get(k, 0))
-        df.at[idx, "Responsável"] = chosen
-        counts[chosen] += 1
-
-    df.drop(columns=["Resp_pre"], inplace=True)
-
-    max_unique = int(df.groupby(["Numero da Oportunidade", "Item"])["Responsável"].nunique().max())
-    if max_unique > 1:
-        raise ValueError("Conflito detectado: a mesma linha foi atribuída a mais de um responsável.")
+    df.drop(columns=["_chave"], inplace=True)
 
     return df
 
 
-def process_zip(zip_path: str | Path, output_path: str | Path) -> Path:
+# ==============================
+# PROCESSAMENTO
+# ==============================
+
+def process(zip_path, output):
     zip_path = Path(zip_path)
-    output_path = Path(output_path)
+    output = Path(output)
 
-    work = output_path.parent / f"_tmp_{output_path.stem}"
-    work.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        work = Path(temp_dir) / "temp_ops"
+        work.mkdir(parents=True, exist_ok=True)
 
-    for p in sorted(work.rglob("*"), reverse=True):
-        try:
-            if p.is_file():
-                p.unlink()
-            else:
-                p.rmdir()
-        except Exception:
-            pass
+        with zipfile.ZipFile(zip_path, "r") as z:
+            z.extractall(work)
 
-    with zipfile.ZipFile(zip_path, "r") as z:
-        z.extractall(work)
+        rows = []
 
-    pdfs = sorted(work.rglob("*.pdf"))
-    rows = []
+        for pdf in work.rglob("*.pdf"):
+            with pdfplumber.open(str(pdf)) as p:
+                raw = norm("\n".join((pg.extract_text() or "") for pg in p.pages))
 
-    for pdf_path in pdfs:
-        with pdfplumber.open(str(pdf_path)) as pdf:
-            raw = norm("\n".join((pg.extract_text() or "") for pg in pdf.pages))
+            num, tipo, crit, fim, local = extract_header(raw)
 
-        numero, tipo, criterio, fim, local = extract_header(raw, pdf_path.stem)
+            for b in re.split(r"Dados do Item", raw)[1:]:
+                m = re.search(r"\n\s*(\d+)\s", b)
+                if not m:
+                    continue
 
-        for block in re.split(r"(?i)\bDados do Item\b", raw)[1:]:
-            item = extract_item_id(block)
-            if not item:
-                continue
+                iid = m.group(1)
 
-            quantidade, unidade = extract_qty_unit(block, item)
-            desc = extract_desc(block)
-            longd = extract_long(block)
-            fab = extract_fab(longd)
+                desc_match = re.search(r"Descrição de Item\s*(.*?)(?=Descrição longa|$)", b, re.S)
+                desc = oneline(desc_match.group(1)) if desc_match else ""
 
-            rows.append(
-                {
-                    "Numero da Oportunidade": numero,
-                    "Tipo de Oportunidade": tipo,
-                    "Critério de Julgamento": criterio,
-                    "Fim do período de cotação": fim,
-                    "Local de Entrega": local,
-                    "Item": item,
-                    "Quantidade": quantidade,
-                    "Unidade de medida": unidade,
-                    "Descrição de Item": desc,
-                    "Descrição longa do item": longd,
-                    "Fabricante/PN": fab,
-                }
-            )
+                long_match = re.search(r"Descrição longa.*?(.*)$", b, re.S)
+                longd = oneline(long_match.group(1)) if long_match else ""
 
-    df = pd.DataFrame(rows)
-    if len(df):
-        df = df.drop_duplicates(subset=["Numero da Oportunidade", "Item"], keep="first")
-
-        dt = pd.to_datetime(
-            df["Fim do período de cotação"].astype(str).str.replace(" / ", " ", regex=False),
-            format="%d.%m.%Y %H:%M:%S",
-            errors="coerce",
-        )
-        df["Data (cotação)"] = dt.dt.date
-        df["Hora (cotação)"] = dt.dt.time
-        df["Status"] = ""
-
-        df = assign_responsavel(df)
-
-        cols = [
-            "Numero da Oportunidade",
-            "Tipo de Oportunidade",
-            "Critério de Julgamento",
-            "Fim do período de cotação",
-            "Data (cotação)",
-            "Hora (cotação)",
-            "Local de Entrega",
-            "Item",
-            "Quantidade",
-            "Unidade de medida",
-            "Descrição de Item",
-            "Descrição longa do item",
-            "Fabricante/PN",
-            "Responsável",
-            "Status",
-        ]
-        df = df[cols]
-
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        if len(df):
-            for responsavel in ["Ana Beatriz", "Viviana", "Hélio", "Mayara"]:
-                df[df["Responsável"] == responsavel].to_excel(
-                    writer, sheet_name=responsavel, index=False
+                rows.append(
+                    {
+                        "Numero da Oportunidade": num,
+                        "Tipo de Oportunidade": tipo,
+                        "Critério de Julgamento": crit,
+                        "Fim do período de cotação": fim,
+                        "Local de Entrega": local,
+                        "Item": iid,
+                        "Quantidade": "",
+                        "Unidade de medida": "",
+                        "Descrição de Item": desc,
+                        "Descrição longa do item": longd,
+                        "Fabricante/PN": extract_fab(longd),
+                    }
                 )
-            df.to_excel(writer, sheet_name="Consolidado", index=False)
 
-            resumo = pd.DataFrame({"Responsável": ["Ana Beatriz", "Viviana", "Hélio", "Mayara"]})
-            resumo["Atual"] = resumo["Responsável"].map(lambda x: int((df["Responsável"] == x).sum()))
-            resumo["%"] = (resumo["Atual"] / len(df) * 100).round(1)
-            resumo.to_excel(writer, sheet_name="Resumo", index=False)
+        if rows:
+            df = pd.DataFrame(rows).drop_duplicates(["Numero da Oportunidade", "Item"])
+            df = assign(df)
         else:
-            pd.DataFrame({"Aviso": ["Nenhum item encontrado nos PDFs"]}).to_excel(
-                writer, sheet_name="Consolidado", index=False
+            df = pd.DataFrame(
+                columns=[
+                    "Numero da Oportunidade",
+                    "Tipo de Oportunidade",
+                    "Critério de Julgamento",
+                    "Fim do período de cotação",
+                    "Local de Entrega",
+                    "Item",
+                    "Quantidade",
+                    "Unidade de medida",
+                    "Descrição de Item",
+                    "Descrição longa do item",
+                    "Fabricante/PN",
+                    "Responsável",
+                ]
             )
 
-    return output_path
+        with pd.ExcelWriter(output, engine="openpyxl") as w:
+            if not df.empty:
+                for r in ["Viviana", "Hélio", "Mayara"]:
+                    df[df["Responsável"] == r].to_excel(w, sheet_name=r, index=False)
+                df.to_excel(w, sheet_name="Consolidado", index=False)
 
+                resumo = pd.DataFrame({"Responsável": ["Viviana", "Hélio", "Mayara"]})
+                resumo["Atual"] = resumo["Responsável"].map(lambda x: int((df["Responsável"] == x).sum()))
+                resumo["%"] = (resumo["Atual"] / len(df) * 100).round(1)
+                resumo.to_excel(w, sheet_name="Resumo", index=False)
+            else:
+                pd.DataFrame({"Aviso": ["Nenhum item encontrado nos PDFs"]}).to_excel(
+                    w, sheet_name="Consolidado", index=False
+                )
+
+    return output
+
+
+# ==============================
+# UI / STREAMLIT
+# ==============================
 
 st.set_page_config(page_title="Separador de OPS", layout="wide")
 
@@ -634,7 +564,7 @@ st.markdown(
 )
 
 
-def render_topbar() -> None:
+def render_topbar():
     st.markdown(
         """
         <div class="topbar">
@@ -656,7 +586,7 @@ def render_topbar() -> None:
     )
 
 
-def render_hero(has_preview: bool, preview_df: pd.DataFrame | None = None) -> None:
+def render_hero(has_preview: bool, preview_df: pd.DataFrame | None = None):
     total_registros = len(preview_df) if has_preview and preview_df is not None else 0
     total_arquivos = 1 if has_preview else 0
     total_responsaveis = (
@@ -697,13 +627,17 @@ def render_hero(has_preview: bool, preview_df: pd.DataFrame | None = None) -> No
     )
 
 
+# ==============================
+# EXECUÇÃO DA APP
+# ==============================
+
 render_topbar()
 
 uploaded_file = None
-error_message = None
 preview_df = None
 excel_bytes = None
 result_name = None
+error_message = None
 
 st.markdown("<div class='section-card'>", unsafe_allow_html=True)
 st.markdown("<div class='section-title'>Upload de arquivo ZIP</div>", unsafe_allow_html=True)
@@ -722,13 +656,13 @@ if uploaded_file is not None:
             temp_dir = Path(temp_dir)
 
             zip_path = temp_dir / uploaded_file.name
-            output_path = temp_dir / f"{Path(uploaded_file.name).stem}_Separar_OPS.xlsx"
+            output_path = temp_dir / f"{Path(uploaded_file.name).stem}_saida.xlsx"
 
             with open(zip_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
             with st.spinner("Processando PDFs e gerando Excel..."):
-                result_path = process_zip(zip_path, output_path)
+                result_path = process(zip_path, output_path)
 
             preview_df = pd.read_excel(result_path, sheet_name="Consolidado")
 
