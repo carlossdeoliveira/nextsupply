@@ -62,6 +62,59 @@ def extract_header(raw, fallback=""):
     return numero, tipo, crit, fim, local
 
 
+def extract_item_id(block):
+    patterns = [
+        (r"(?m)^\s*(\d{1,6})\s+\S", 0),
+        (r"(?i)Número\s+Descrição.*?\n(\d+)\s", re.S),
+        (r"(?i)Número\s*\n\s*do item\s*(?:\n|\s)+([0-9A-Za-z\.\-]+)", 0),
+    ]
+    for pattern, flags in patterns:
+        m = re.search(pattern, block, flags=flags)
+        if m:
+            return re.sub(r"\D", "", m.group(1))
+    return ""
+
+
+def extract_qty_unit(block, item_id):
+    if not item_id:
+        return "", ""
+
+    patterns = [
+        rf"(?im)^\s*{re.escape(item_id)}\s+.*?\bMaterial\b\s+([0-9]+(?:\.[0-9]{{3}})*(?:,[0-9]+)?)\s+([A-Za-zÀ-ÿ]+)\s+\d{{2}}\.\d{{2}}\.\d{{4}}\b",
+        rf"(?im)^\s*{re.escape(item_id)}\s+.*?\b([0-9]+(?:\.[0-9]{{3}})*(?:,[0-9]+)?)\s+([A-Za-zÀ-ÿ]+)\s+\d{{2}}\.\d{{2}}\.\d{{4}}\b",
+        rf"(?is)\b{re.escape(item_id)}\b.*?\bMaterial\b\s+([0-9]+(?:\.[0-9]{{3}})*(?:,[0-9]+)?)\s+([A-Za-zÀ-ÿ]+)\b",
+        rf"(?is)\bQuantidade\b\s*([0-9]+(?:\.[0-9]{{3}})*(?:,[0-9]+)?)\s+\b([A-Za-zÀ-ÿ]+)\b",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, block)
+        if m:
+            return m.group(1).strip(), m.group(2).strip()
+
+    return "", ""
+
+
+def extract_desc(block):
+    m = re.search(
+        r"(?is)(?:Descrição de Item|Descricao de Item)\s*(.*?)(?:(?:\n(?:Descrição longa do item|Descricao longa do item|Descrição longa|Descricao longa))|\Z)",
+        block,
+    )
+    return oneline(m.group(1)) if m else ""
+
+
+def extract_long(block):
+    block2 = re.split(
+        r"(?i)Declarações envolvidas na oportunidade|Declaracoes envolvidas na oportunidade",
+        block,
+        maxsplit=1,
+    )[0]
+    m = re.search(
+        r"(?is)(?:Descrição longa do item|Descricao longa do item|Descrição longa|Descricao longa)\s*(.*)$",
+        block2,
+    )
+    return oneline(m.group(1)) if m else ""
+
+
 def extract_fab(longd):
     if not longd:
         return ""
@@ -88,13 +141,11 @@ def assign(df):
 
     df["Responsável"] = pd.NA
 
-    # PRIORIDADE: Inaplica
     df.loc[
         df["Tipo de Oportunidade"].fillna("").str.contains("Inaplica.", na=False, regex=False),
         "Responsável",
     ] = "Viviana"
 
-    # HÉLIO
     helio_terms = ["abb", "schneider", "siemens", "rittal", "phoenix", "weidmuller", "rockwell"]
     for t in helio_terms:
         df.loc[
@@ -102,21 +153,18 @@ def assign(df):
             "Responsável",
         ] = "Hélio"
 
-    # MAYARA
     for t in ["skf", "emerson"]:
         df.loc[
             df["Responsável"].isna() & text.str.contains(patt(t), regex=True, na=False),
             "Responsável",
         ] = "Mayara"
 
-    # VIVIANA
     for t in ["kongsberg", "yamada", "dnh", "evac", "steyr"]:
         df.loc[
             df["Responsável"].isna() & text.str.contains(patt(t), regex=True, na=False),
             "Responsável",
         ] = "Viviana"
 
-    # GARANTIA: ITENS IGUAIS JUNTOS
     df["_chave"] = (
         df["Descrição de Item"].fillna("").str.strip().str.lower()
         + "|"
@@ -199,22 +247,14 @@ def process(zip_path, output_path):
 
             num, tipo, crit, fim, local = extract_header(raw, pdf.stem)
 
-            for bloco in re.split(r"(?i)Dados do Item", raw)[1:]:
-                m = re.search(r"\n\s*(\d+)\s", bloco)
-                if not m:
+            for bloco in re.split(r"(?i)\bDados do Item\b", raw)[1:]:
+                item_id = extract_item_id(bloco)
+                if not item_id:
                     continue
 
-                iid = m.group(1)
-
-                desc_match = re.search(
-                    r"Descrição de Item\s*(.*?)(?=Descrição longa|$)",
-                    bloco,
-                    re.S,
-                )
-                desc = oneline(desc_match.group(1)) if desc_match else ""
-
-                long_match = re.search(r"Descrição longa.*?(.*)$", bloco, re.S)
-                longd = oneline(long_match.group(1)) if long_match else ""
+                quantidade, unidade = extract_qty_unit(bloco, item_id)
+                desc = extract_desc(bloco)
+                longd = extract_long(bloco)
 
                 rows.append(
                     {
@@ -223,9 +263,9 @@ def process(zip_path, output_path):
                         "Critério de Julgamento": crit,
                         "Fim do período de cotação": fim,
                         "Local de Entrega": local,
-                        "Item": iid,
-                        "Quantidade": "",
-                        "Unidade de medida": "",
+                        "Item": item_id,
+                        "Quantidade": quantidade,
+                        "Unidade de medida": unidade,
                         "Descrição de Item": desc,
                         "Descrição longa do item": longd,
                         "Fabricante/PN": extract_fab(longd),
@@ -286,10 +326,6 @@ st.markdown(
             --muted: #a9b4ea;
             --primary: #1237ff;
             --primary-2: #3f5dff;
-            --success-bg: rgba(12, 194, 126, 0.12);
-            --success-border: rgba(12, 194, 126, 0.35);
-            --danger-bg: rgba(255, 82, 82, 0.10);
-            --danger-border: rgba(255, 82, 82, 0.30);
             --shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
             --radius-xl: 28px;
             --radius-lg: 22px;
