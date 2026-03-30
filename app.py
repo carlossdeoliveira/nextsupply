@@ -136,7 +136,7 @@ def extract_fab(longd):
     if not longd:
         return ""
 
-    # Corta qualquer ruído conhecido antes da extração final
+    # Corta ruídos conhecidos antes da extração
     cleaned = re.split(
         r"(?is)Resumo extra[ií]do por|Resumo da Oportunidade",
         longd,
@@ -152,9 +152,27 @@ def extract_fab(longd):
 
     fab = re.sub(r"\s{2,}", " ", m.group(1)).strip()
 
-    # Blindagem extra caso algo passe
+    # Remove resíduos textuais conhecidos
     fab = re.sub(r"(?is)Resumo extra[ií]do por.*$", "", fab).strip()
     fab = re.sub(r"(?is)Resumo da Oportunidade.*$", "", fab).strip()
+
+    # Remove data/hora de extração no final:
+    # exemplos:
+    # 06.02.2026 às 09:48:04
+    # 06.02.2026 as 09:48:04
+    # 06.02.2026 09:48:04
+    fab = re.sub(
+        r"\s*\b\d{2}\.\d{2}\.\d{4}(?:\s*(?:às|as))?\s*\d{2}:\d{2}:\d{2}\b.*$",
+        "",
+        fab,
+        flags=re.I,
+    ).strip()
+
+    # Remove eventual data solta no final
+    fab = re.sub(r"\s*\b\d{2}\.\d{2}\.\d{4}\b.*$", "", fab).strip()
+
+    # Remove barras ou hífens sobrando no fim
+    fab = re.sub(r"[\s/\-|:;,]+$", "", fab).strip()
 
     return fab
 
