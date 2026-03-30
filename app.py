@@ -213,6 +213,8 @@ def process(zip_path, output_path):
         "Tipo de Oportunidade",
         "Critério de Julgamento",
         "Fim do período de cotação",
+        "Data (cotação)",
+        "Hora (cotação)",
         "Local de Entrega",
         "Item",
         "Quantidade",
@@ -275,7 +277,35 @@ def process(zip_path, output_path):
     if rows:
         df = pd.DataFrame(rows)
         df = df.drop_duplicates(subset=["Numero da Oportunidade", "Item"], keep="first")
+
+        dt = pd.to_datetime(
+            df["Fim do período de cotação"].astype(str).str.replace(" / ", " ", regex=False),
+            format="%d.%m.%Y %H:%M:%S",
+            errors="coerce",
+        )
+        df["Data (cotação)"] = dt.dt.date
+        df["Hora (cotação)"] = dt.dt.time
+
         df = assign(df)
+
+        df = df[
+            [
+                "Numero da Oportunidade",
+                "Tipo de Oportunidade",
+                "Critério de Julgamento",
+                "Fim do período de cotação",
+                "Data (cotação)",
+                "Hora (cotação)",
+                "Local de Entrega",
+                "Item",
+                "Quantidade",
+                "Unidade de medida",
+                "Descrição de Item",
+                "Descrição longa do item",
+                "Fabricante/PN",
+                "Responsável",
+            ]
+        ]
     else:
         df = pd.DataFrame(columns=expected_columns)
 
