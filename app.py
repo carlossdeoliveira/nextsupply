@@ -276,15 +276,17 @@ def process(zip_path, output_path):
 
     if rows:
         dt = pd.to_datetime(
-    df["Fim do período de cotação"].astype(str).str.replace(" / ", " ", regex=False),
+    df["Fim do período de cotação"]
+        .astype(str)
+        .str.replace(" / ", " ", regex=False),
     format="%d.%m.%Y %H:%M:%S",
-    errors="coerce",
+    errors="coerce"
 )
 
-# Data formatada como texto dd/mm/aaaa
+# Data formatada dd/mm/aaaa (SEM hora)
 df["Data (cotação)"] = dt.dt.strftime("%d/%m/%Y")
 
-# Hora formatada hh:mm:ss
+# Hora formatada
 df["Hora (cotação)"] = dt.dt.strftime("%H:%M:%S")
 
         df = assign(df)
