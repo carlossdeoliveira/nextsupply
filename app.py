@@ -275,16 +275,17 @@ def process(zip_path, output_path):
                 )
 
     if rows:
-        df = pd.DataFrame(rows)
-        df = df.drop_duplicates(subset=["Numero da Oportunidade", "Item"], keep="first")
-
         dt = pd.to_datetime(
-            df["Fim do período de cotação"].astype(str).str.replace(" / ", " ", regex=False),
-            format="%d.%m.%Y %H:%M:%S",
-            errors="coerce",
-        )
-        df["Data (cotação)"] = dt.dt.date
-        df["Hora (cotação)"] = dt.dt.time
+    df["Fim do período de cotação"].astype(str).str.replace(" / ", " ", regex=False),
+    format="%d.%m.%Y %H:%M:%S",
+    errors="coerce",
+)
+
+# Data formatada como texto dd/mm/aaaa
+df["Data (cotação)"] = dt.dt.strftime("%d/%m/%Y")
+
+# Hora formatada hh:mm:ss
+df["Hora (cotação)"] = dt.dt.strftime("%H:%M:%S")
 
         df = assign(df)
 
