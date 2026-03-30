@@ -1,11 +1,11 @@
 import re
-import sys
 import zipfile
 import tempfile
 from pathlib import Path
 
 import pandas as pd
 import pdfplumber
+import streamlit as st
 
 
 # ==============================
@@ -27,8 +27,8 @@ def oneline(text):
     return text
 
 
-def patt(t):
-    parts = re.split(r"\s+", str(t).strip().lower())
+def patt(term):
+    parts = re.split(r"\s+", str(term).strip().lower())
     return r"\b" + r"[\s\-]?".join(map(re.escape, parts)) + r"\b"
 
 
@@ -57,7 +57,7 @@ def extract_header(raw, fallback=""):
     fim = re.sub(r"\s*/\s*", " / ", fim.group(1)).strip() if fim else ""
 
     ml = re.search(r"Local de Entrega\s*(.*?)\nInformações do Comprador", raw, flags=re.S)
-    local = "; ".join(x.strip() for x in ml.group(1).split("\n") if x.strip()) if ml else ""
+    local = "; ".join([x.strip() for x in ml.group(1).split("\n") if x.strip()]) if ml else ""
 
     return numero, tipo, crit, fim, local
 
@@ -94,7 +94,7 @@ def assign(df):
         "Responsável",
     ] = "Viviana"
 
-    # HELIO (TRAVADO)
+    # HÉLIO
     helio_terms = ["abb", "schneider", "siemens", "rittal", "phoenix", "weidmuller", "rockwell"]
     for t in helio_terms:
         df.loc[
@@ -102,7 +102,7 @@ def assign(df):
             "Responsável",
         ] = "Hélio"
 
-    # MAYARA (TRAVADO)
+    # MAYARA
     for t in ["skf", "emerson"]:
         df.loc[
             df["Responsável"].isna() & text.str.contains(patt(t), regex=True, na=False),
@@ -118,8 +118,10 @@ def assign(df):
 
     # GARANTIA: ITENS IGUAIS JUNTOS
     df["_chave"] = (
-        df["Descrição de Item"].fillna("").str.strip().str.lower() + "|"
-        + df["Descrição longa do item"].fillna("").str.strip().str.lower() + "|"
+        df["Descrição de Item"].fillna("").str.strip().str.lower()
+        + "|"
+        + df["Descrição longa do item"].fillna("").str.strip().str.lower()
+        + "|"
         + df["Fabricante/PN"].fillna("").str.strip().str.lower()
     )
 
@@ -151,9 +153,9 @@ def assign(df):
 # PROCESSAMENTO
 # ==============================
 
-def process(zip_path, output):
+def process(zip_path, output_path):
     zip_path = Path(zip_path)
-    output = Path(output)
+    output_path = Path(output_path)
 
     if not zip_path.exists():
         raise FileNotFoundError(f"Arquivo ZIP não encontrado: {zip_path}")
@@ -170,6 +172,7 @@ def process(zip_path, output):
         "Descrição de Item",
         "Descrição longa do item",
         "Fabricante/PN",
+        "Responsável",
     ]
 
     rows = []
@@ -181,23 +184,36 @@ def process(zip_path, output):
         with zipfile.ZipFile(zip_path, "r") as z:
             z.extractall(work)
 
-        for pdf in work.rglob("*.pdf"):
+        pdfs = list(work.rglob("*.pdf"))
+        if not pdfs:
+            df = pd.DataFrame(columns=expected_columns)
+            with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+                pd.DataFrame({"Aviso": ["Nenhum PDF encontrado no arquivo ZIP"]}).to_excel(
+                    writer, sheet_name="Consolidado", index=False
+                )
+            return output_path
+
+        for pdf in pdfs:
             with pdfplumber.open(str(pdf)) as p:
                 raw = norm("\n".join((pg.extract_text() or "") for pg in p.pages))
 
             num, tipo, crit, fim, local = extract_header(raw, pdf.stem)
 
-            for b in re.split(r"(?i)Dados do Item", raw)[1:]:
-                m = re.search(r"\n\s*(\d+)\s", b)
+            for bloco in re.split(r"(?i)Dados do Item", raw)[1:]:
+                m = re.search(r"\n\s*(\d+)\s", bloco)
                 if not m:
                     continue
 
                 iid = m.group(1)
 
-                desc_match = re.search(r"Descrição de Item\s*(.*?)(?=Descrição longa|$)", b, re.S)
+                desc_match = re.search(
+                    r"Descrição de Item\s*(.*?)(?=Descrição longa|$)",
+                    bloco,
+                    re.S,
+                )
                 desc = oneline(desc_match.group(1)) if desc_match else ""
 
-                long_match = re.search(r"Descrição longa.*?(.*)$", b, re.S)
+                long_match = re.search(r"Descrição longa.*?(.*)$", bloco, re.S)
                 longd = oneline(long_match.group(1)) if long_match else ""
 
                 rows.append(
@@ -219,46 +235,391 @@ def process(zip_path, output):
     if rows:
         df = pd.DataFrame(rows)
         df = df.drop_duplicates(subset=["Numero da Oportunidade", "Item"], keep="first")
+        df = assign(df)
     else:
         df = pd.DataFrame(columns=expected_columns)
 
-    df = assign(df)
-
-    with pd.ExcelWriter(output, engine="openpyxl") as w:
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         if not df.empty:
-            for r in ["Viviana", "Hélio", "Mayara"]:
-                df[df["Responsável"] == r].to_excel(w, sheet_name=r, index=False)
-            df.to_excel(w, sheet_name="Consolidado", index=False)
+            for responsavel in ["Viviana", "Hélio", "Mayara"]:
+                df[df["Responsável"] == responsavel].to_excel(
+                    writer,
+                    sheet_name=responsavel,
+                    index=False,
+                )
+
+            df.to_excel(writer, sheet_name="Consolidado", index=False)
 
             resumo = pd.DataFrame({"Responsável": ["Viviana", "Hélio", "Mayara"]})
-            resumo["Atual"] = resumo["Responsável"].map(lambda x: int((df["Responsável"] == x).sum()))
+            resumo["Atual"] = resumo["Responsável"].map(
+                lambda x: int((df["Responsável"] == x).sum())
+            )
             resumo["%"] = (resumo["Atual"] / len(df) * 100).round(1)
-            resumo.to_excel(w, sheet_name="Resumo", index=False)
+            resumo.to_excel(writer, sheet_name="Resumo", index=False)
         else:
             pd.DataFrame({"Aviso": ["Nenhum item encontrado nos PDFs"]}).to_excel(
-                w,
+                writer,
                 sheet_name="Consolidado",
                 index=False,
             )
 
-    return output
+    return output_path
 
 
 # ==============================
-# EXECUÇÃO
+# UI / STREAMLIT
 # ==============================
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Uso: python script.py arquivo.zip [arquivo_saida.xlsx]")
-        sys.exit(1)
+st.set_page_config(page_title="Separador de OPS", layout="wide")
 
-    zip_file = sys.argv[1]
-    output_file = sys.argv[2] if len(sys.argv) > 2 else "saida.xlsx"
+st.markdown(
+    """
+    <style>
+        :root {
+            --bg: #02053d;
+            --panel: #060a53;
+            --panel-2: #08106a;
+            --panel-soft: rgba(255, 255, 255, 0.04);
+            --border: rgba(63, 93, 255, 0.35);
+            --border-soft: rgba(255, 255, 255, 0.08);
+            --text: #f5f7ff;
+            --muted: #a9b4ea;
+            --primary: #1237ff;
+            --primary-2: #3f5dff;
+            --success-bg: rgba(12, 194, 126, 0.12);
+            --success-border: rgba(12, 194, 126, 0.35);
+            --danger-bg: rgba(255, 82, 82, 0.10);
+            --danger-border: rgba(255, 82, 82, 0.30);
+            --shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+            --radius-xl: 28px;
+            --radius-lg: 22px;
+        }
 
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(63, 93, 255, 0.20), transparent 28%),
+                radial-gradient(circle at top right, rgba(18, 55, 255, 0.16), transparent 24%),
+                linear-gradient(180deg, #010332 0%, var(--bg) 100%);
+            color: var(--text);
+        }
+
+        .block-container {
+            max-width: 1360px;
+            padding-top: 1.6rem;
+            padding-bottom: 2.5rem;
+        }
+
+        [data-testid="stHeader"] {
+            background: transparent;
+        }
+
+        h1, h2, h3, h4, h5, h6, p, label, div, span {
+            color: var(--text);
+        }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 24px;
+            background: rgba(4, 8, 70, 0.80);
+            border: 1px solid var(--border-soft);
+            border-radius: 24px;
+            padding: 18px 24px;
+            box-shadow: var(--shadow);
+            margin-bottom: 22px;
+        }
+
+        .brand-wrap {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .brand-mark {
+            width: 58px;
+            height: 58px;
+            border-radius: 14px;
+            background: linear-gradient(135deg, var(--primary-2), var(--primary));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white !important;
+            font-size: 1.8rem;
+            font-weight: 800;
+            box-shadow: 0 10px 30px rgba(18, 55, 255, 0.35);
+        }
+
+        .brand-title {
+            font-size: 1.5rem;
+            font-weight: 800;
+            line-height: 1;
+            margin: 0;
+        }
+
+        .brand-subtitle {
+            margin: 4px 0 0 0;
+            color: var(--muted) !important;
+            font-size: 0.95rem;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 28px;
+            align-items: center;
+            color: var(--muted);
+            font-weight: 600;
+        }
+
+        .nav-links span.active {
+            color: var(--text);
+            position: relative;
+        }
+
+        .nav-links span.active::after {
+            content: "";
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: -10px;
+            height: 2px;
+            background: var(--primary-2);
+            border-radius: 999px;
+        }
+
+        .hero {
+            background: linear-gradient(180deg, rgba(6, 10, 83, 0.92) 0%, rgba(4, 7, 58, 0.92) 100%);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-xl);
+            padding: 30px;
+            box-shadow: var(--shadow);
+            margin-bottom: 20px;
+        }
+
+        .hero-title {
+            font-size: 2.4rem;
+            font-weight: 800;
+            margin-bottom: 0.45rem;
+        }
+
+        .hero-subtitle {
+            color: var(--muted) !important;
+            font-size: 1.02rem;
+            margin-bottom: 1.4rem;
+            max-width: 920px;
+        }
+
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 16px;
+        }
+
+        .metric-card {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border-soft);
+            border-radius: var(--radius-lg);
+            padding: 18px 20px;
+            backdrop-filter: blur(8px);
+        }
+
+        .metric-label {
+            color: var(--muted) !important;
+            font-size: 0.9rem;
+            margin-bottom: 8px;
+        }
+
+        .metric-value {
+            font-size: 1.7rem;
+            font-weight: 800;
+            line-height: 1.1;
+            color: var(--text) !important;
+        }
+
+        div[data-testid="stFileUploader"] section {
+            background: rgba(255,255,255,0.03) !important;
+            border: 1px dashed rgba(88, 117, 255, 0.45) !important;
+            border-radius: 18px !important;
+            padding: 8px !important;
+        }
+
+        div[data-testid="stFileUploaderDropzone"] {
+            background: rgba(255,255,255,0.02) !important;
+            border: none !important;
+            border-radius: 16px !important;
+        }
+
+        div[data-testid="stDataFrame"] {
+            border: 1px solid var(--border-soft) !important;
+            border-radius: 18px !important;
+            overflow: hidden !important;
+            background: rgba(255,255,255,0.02) !important;
+        }
+
+        .stDownloadButton > button,
+        .stButton > button {
+            border-radius: 14px !important;
+            min-height: 46px !important;
+            padding: 0.72rem 1.15rem !important;
+            font-weight: 800 !important;
+            border: 1px solid transparent !important;
+            color: white !important;
+            background: linear-gradient(135deg, var(--primary), var(--primary-2)) !important;
+            box-shadow: 0 10px 24px rgba(18, 55, 255, 0.28) !important;
+        }
+
+        .stAlert {
+            border-radius: 16px !important;
+        }
+
+        @media (max-width: 1100px) {
+            .metric-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+            .nav-links {
+                display: none;
+            }
+        }
+
+        @media (max-width: 700px) {
+            .metric-grid {
+                grid-template-columns: 1fr;
+            }
+            .hero-title {
+                font-size: 1.8rem;
+            }
+            .topbar {
+                padding: 16px 18px;
+            }
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def render_topbar():
+    st.markdown(
+        """
+        <div class="topbar">
+            <div class="brand-wrap">
+                <div class="brand-mark">N</div>
+                <div>
+                    <p class="brand-title">NEXT SUPPLY</p>
+                    <p class="brand-subtitle">Separador de OPS</p>
+                </div>
+            </div>
+            <div class="nav-links">
+                <span class="active">Dashboard</span>
+                <span>Histórico de Uploads</span>
+                <span>Exportações</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_hero(preview_df=None):
+    has_preview = preview_df is not None and not preview_df.empty
+    total_registros = len(preview_df) if preview_df is not None else 0
+    total_arquivos = 1 if preview_df is not None else 0
+    total_responsaveis = (
+        int(preview_df["Responsável"].nunique())
+        if has_preview and "Responsável" in preview_df.columns
+        else 0
+    )
+    status_text = "Pronto" if has_preview else "Aguardando arquivo"
+
+    st.markdown(
+        f"""
+        <div class="hero">
+            <div class="hero-title">Separador de OPS</div>
+            <div class="hero-subtitle">
+                Faça upload de um arquivo ZIP contendo os PDFs das oportunidades e visualize o consolidado em um painel alinhado à identidade visual da Next Supply.
+            </div>
+            <div class="metric-grid">
+                <div class="metric-card">
+                    <div class="metric-label">Arquivos enviados</div>
+                    <div class="metric-value">{total_arquivos}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Registros consolidados</div>
+                    <div class="metric-value">{total_registros}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Responsáveis</div>
+                    <div class="metric-value">{total_responsaveis}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Status</div>
+                    <div class="metric-value">{status_text}</div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ==============================
+# APP
+# ==============================
+
+render_topbar()
+
+preview_df = None
+excel_bytes = None
+result_name = None
+
+st.title("Upload de arquivo ZIP")
+st.caption("Selecione o arquivo compactado com os PDFs das oportunidades.")
+
+uploaded_file = st.file_uploader(
+    "Selecione o arquivo ZIP",
+    type=["zip"],
+)
+
+if uploaded_file is not None:
     try:
-        result = process(zip_file, output_file)
-        print(f"Arquivo gerado com sucesso: {result}")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir = Path(temp_dir)
+
+            zip_path = temp_dir / uploaded_file.name
+            output_path = temp_dir / f"{Path(uploaded_file.name).stem}_saida.xlsx"
+
+            with open(zip_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            with st.spinner("Processando PDFs e gerando Excel..."):
+                result_path = process(zip_path, output_path)
+
+            try:
+                preview_df = pd.read_excel(result_path, sheet_name="Consolidado")
+            except Exception:
+                preview_df = pd.DataFrame()
+
+            with open(result_path, "rb") as f:
+                excel_bytes = f.read()
+
+            result_name = result_path.name
+
+        st.success("Arquivo processado com sucesso.")
+
     except Exception as e:
-        print(f"Erro ao processar: {e}")
-        sys.exit(1)
+        st.error(f"Erro ao processar o arquivo: {e}")
+
+render_hero(preview_df)
+
+if preview_df is not None:
+    st.subheader("Prévia do Consolidado")
+    st.caption("Visualização do arquivo consolidado gerado a partir dos PDFs processados.")
+    st.dataframe(preview_df, use_container_width=True)
+
+if excel_bytes is not None and result_name is not None:
+    st.download_button(
+        label="Baixar Excel gerado",
+        data=excel_bytes,
+        file_name=result_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
