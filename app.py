@@ -14,7 +14,24 @@ import streamlit as st
 
 def norm(text):
     text = (text or "").replace("\u00ad", "")
+
+    # Remove paginação
     text = re.sub(r"\bPág:\s*\d+/\d+\b", "", text, flags=re.I)
+
+    # Remove blocos de resumo extraído do portal
+    text = re.sub(
+        r"(?is)Resumo extra[ií]do por.*?(?=\n|$)",
+        "",
+        text,
+    )
+
+    # Remove linha "Resumo da Oportunidade" quando vier colada nesse ruído
+    text = re.sub(
+        r"(?im)^\s*Resumo da Oportunidade\s*$",
+        "",
+        text,
+    )
+
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\s*\n\s*", "\n", text)
     return text.strip()
@@ -118,8 +135,28 @@ def extract_long(block):
 def extract_fab(longd):
     if not longd:
         return ""
-    m = re.search(r"(?is)(?:Tp:|Type:|----------)\s*(.*?)(?=Tag|Dados|Número|Declara|$)", longd)
-    return re.sub(r"\s{2,}", " ", m.group(1)).strip() if m else ""
+
+    # Corta qualquer ruído conhecido antes da extração final
+    cleaned = re.split(
+        r"(?is)Resumo extra[ií]do por|Resumo da Oportunidade",
+        longd,
+        maxsplit=1,
+    )[0]
+
+    m = re.search(
+        r"(?is)(?:Tp:|Type:|----------)\s*(.*?)(?=Tag|Dados|Número|Declara|Resumo|$)",
+        cleaned,
+    )
+    if not m:
+        return ""
+
+    fab = re.sub(r"\s{2,}", " ", m.group(1)).strip()
+
+    # Blindagem extra caso algo passe
+    fab = re.sub(r"(?is)Resumo extra[ií]do por.*$", "", fab).strip()
+    fab = re.sub(r"(?is)Resumo da Oportunidade.*$", "", fab).strip()
+
+    return fab
 
 
 # ==============================
@@ -281,7 +318,7 @@ def process(zip_path, output_path):
         dt = pd.to_datetime(
             df["Fim do período de cotação"].astype(str).str.replace(" / ", " ", regex=False),
             format="%d.%m.%Y %H:%M:%S",
-            errors="coerce"
+            errors="coerce",
         )
 
         df["Data (cotação)"] = dt.dt.strftime("%d/%m/%Y")
